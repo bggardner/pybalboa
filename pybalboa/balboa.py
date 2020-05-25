@@ -61,6 +61,7 @@ mtypes = [
 ]
 
 text_heatmode = ["Ready", "Ready in Rest", "Rest"]
+text_heatstate = ["Idle", "Heating", "Heat Waiting"]
 text_tscale = ["Farenheit", "Celcius"]
 text_timescale = ["12h", "24h"]
 text_pump = ["Off", "Low", "High"]
@@ -103,12 +104,12 @@ class BalboaSpaWifi:
         self.TEMPRANGE_LOW = 0
         self.TEMPRANGE_HIGH = 1
         self.tmin = [
-            [80.0, 26.0],
             [50.0, 10.0],
+            [80.0, 26.0],
         ]
         self.tmax = [
-            [104.0, 40.0],
             [80.0, 26.0],
+            [104.0, 40.0],
         ]
         self.BLOWER_OFF = 0
         self.BLOWER_LOW = 1
@@ -120,6 +121,9 @@ class BalboaSpaWifi:
         self.FILTER_1_2 = 3
         self.OFF = 0
         self.ON = 1
+        self.HEATSTATE_IDLE = 0
+        self.HEATSTATE_HEATING = 1
+        self.HEATSTATE_HEAT_WAITING = 2
 
         # Internal states
         self.host = hostname
@@ -156,6 +160,11 @@ class BalboaSpaWifi:
         self.filter_mode = 0
         self.prior_status = None
         self.new_data_cb = None
+        self.model_name = 'Unknown'
+        self.sw_vers = 'Unknown'
+        self.cfg_sig = 'Unknown'
+        self.setup = 0
+        self.ssid = 'Unknown'
         self.log = logging.getLogger(__name__)
 
     def balboa_calc_cs(self, data, length):
@@ -334,9 +343,12 @@ class BalboaSpaWifi:
         data[8] = M_END
 
         # calculate how many times to push the button
-        for iter in range(0, 2):
-            if newstate == ((self.pump_status[pump] + iter) % 3):
-                break
+        if self.pump_array[pump] == 2:
+            for iter in range(0, 2):
+                if newstate == ((self.pump_status[pump] + iter) % 3):
+                    break
+        else:
+            iter = 1
 
         # now push the button until we hit desired state
         for pushes in range(0, iter):
@@ -507,6 +519,46 @@ class BalboaSpaWifi:
                 return i
         return None
 
+    def parse_noclue1(self, data):
+        """ Parse a noclue1 message.
+
+        00 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16
+        MS SZ 02 03 04 I0 I1 V0 V1 T1 T2 T3 T4 T5 T6 T7 T8
+        7e 1a 0a bf 24 64 dc 14 00 42 50 32 30 30 30 47 31
+
+        17 18 19 20 21 22 23 24 25 26 27
+        SU S0 S1 S2 S3 22 23 D0 D1 26 ME
+        04 51 80 0c 6b 01 0a 02 00 f9 7e
+
+        So far, I've managed to figure out:
+        T1-T8 = model name in ascii.
+        S1-S3 = "Configuration Signature"
+        V0.V1 = Software Vers (ex 20.0)
+        SU = Setup
+        SSID = "M100_220 V20.0"  so M[I0]_[I1] V[V0].[V1]
+        24/25 = could this be the dipswitch?  mine is 0100000000
+
+        Examples:
+        7e1a0abf24 64dc 1400 4250323030304731 04 51800c6b 010a 0200 f9 7e <-- mine
+        7e1a0abf24 64c9 1300 4d51425035303120 01 0403daed 0106 0400 35 7e
+        7e1a0abf24 64e1 2400 4d53343045202020 01 c3479636 030a 4400 19 7e
+        7e1a0abf24 64e1 1400 4250323130304731 11 ebce9fd8 030a 1600 d7 7e
+
+        """
+
+        model = [
+            data[9], data[10],
+            data[11], data[12], data[13],
+            data[14], data[15], data[16],
+        ]
+        model_name = "".join(map(chr, model))
+        self.model_name = model_name.strip()
+
+        self.cfg_sig = f"{data[18]:x}{data[19]:x}{data[20]:x}{data[21]:x}"
+        self.sw_vers = f"{str(data[7])}.{str(data[8])}"
+        self.setup = data[17]
+        self.ssid = f"M{str(data[5])}_{str(data[6])} V{self.sw_vers}"
+
     def parse_config_resp(self, data):
         """ Parse a config response.
 
@@ -526,13 +578,14 @@ class BalboaSpaWifi:
 
         macaddr = f'{data[8]:x}:{data[9]:x}:{data[10]:x}'\
             f':{data[11]:x}:{data[12]:x}:{data[13]:x}'
+
         pump_array = [0, 0, 0, 0, 0, 0]
-        pump_array[0] = int((data[5] & 0x03) != 0)
-        pump_array[1] = int((data[5] & 0x0c) != 0)
-        pump_array[2] = int((data[5] & 0x30) != 0)
-        pump_array[3] = int((data[5] & 0xc0) != 0)
-        pump_array[4] = int((data[6] & 0x03) != 0)
-        pump_array[5] = int((data[6] & 0xc0) != 0)
+        pump_array[0] = int((data[5] & 0x03))
+        pump_array[1] = int((data[5] & 0x0c) >> 2)
+        pump_array[2] = int((data[5] & 0x30) >> 4)
+        pump_array[3] = int((data[5] & 0xc0) >> 6)
+        pump_array[4] = int((data[6] & 0x03))
+        pump_array[5] = int((data[6] & 0xc0) >> 6)
 
         light_array = [0, 0]
         # not a typo
@@ -555,12 +608,12 @@ class BalboaSpaWifi:
         """
 
         # pumps 0-5
-        self.pump_array[0] = int((data[5] & 0x03) != 0)
-        self.pump_array[1] = int((data[5] & 0x0c) != 0)
-        self.pump_array[2] = int((data[5] & 0x30) != 0)
-        self.pump_array[3] = int((data[5] & 0xc0) != 0)
-        self.pump_array[4] = int((data[6] & 0x03) != 0)
-        self.pump_array[5] = int((data[6] & 0xc0) != 0)
+        self.pump_array[0] = int((data[5] & 0x03))
+        self.pump_array[1] = int((data[5] & 0x0c) >> 2)
+        self.pump_array[2] = int((data[5] & 0x30) >> 4)
+        self.pump_array[3] = int((data[5] & 0xc0) >> 6)
+        self.pump_array[4] = int((data[6] & 0x03))
+        self.pump_array[5] = int((data[6] & 0xc0) >> 6)
 
         # lights 0-1
         self.light_array[0] = int((data[7] & 0x03) != 0)
@@ -695,6 +748,9 @@ class BalboaSpaWifi:
             if err.errno == errno.ECONNRESET:
                 self.log.error('Connection reset by peer')
                 self.connected = False
+            if err.errno == errno.EHOSTUNREACH:
+                self.log.error('Spa unreachable')
+                self.connected = False
             else:
                 self.log.error('Spa socket error: {0}'.format(str(err)))
             return None
@@ -768,6 +824,10 @@ class BalboaSpaWifi:
                 self.parse_panel_config_resp(data)
                 await asyncio.sleep(0.1)
                 continue
+            if mtype == BMTR_PANEL_NOCLUE1:
+                self.parse_noclue1(data)
+                await asyncio.sleep(0.1)
+                continue
             self.log.error("Unhandled mtype {0}".format(mtype))
 
     async def spa_configured(self):
@@ -777,6 +837,8 @@ class BalboaSpaWifi:
         """
         await self.send_config_req()
         await self.send_panel_req(0, 1)
+        # get the versions and model data
+        await self.send_panel_req(2, 0)
         while True:
             if (self.connected
                     and self.config_loaded
@@ -820,6 +882,21 @@ class BalboaSpaWifi:
         return False
 
     # Simple accessors
+    def get_model_name(self):
+        return self.model_name
+
+    def get_sw_vers(self):
+        return self.sw_vers
+
+    def get_cfg_sig(self):
+        return self.cfg_sig
+
+    def get_setup(self):
+        return self.setup
+
+    def get_ssid(self):
+        return self.ssid
+
     def get_tempscale(self, text=False):
         """ What is our tempscale? """
         if text:
@@ -849,7 +926,7 @@ class BalboaSpaWifi:
     def get_heatstate(self, text=False):
         """ Ask for the current heat state. """
         if text:
-            return text_switch[self.heatstate]
+            return text_heatstate[self.heatstate]
         return self.heatstate
 
     def get_temprange(self, text=False):
