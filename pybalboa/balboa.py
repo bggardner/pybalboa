@@ -4,6 +4,8 @@ import logging
 from socket import error as SocketError
 import errno
 
+import pybalboa.messages as messages
+
 BALBOA_DEFAULT_PORT = 4257
 
 M_START = 0x7e
@@ -62,31 +64,46 @@ mtypes = [
 
 text_heatmode = ["Ready", "Ready in Rest", "Rest"]
 text_heatstate = ["Idle", "Heating", "Heat Waiting"]
-text_tscale = ["Farenheit", "Celcius"]
+text_tscale = ["Fahrenheit", "Celsius"]
 text_timescale = ["12h", "24h"]
 text_pump = ["Off", "Low", "High"]
-text_temprange = ["Low", "High"]
+text_temprange = ["High", "Low"]
 text_blower = ["Off", "Low", "Medium", "High"]
 text_switch = ["Off", "On"]
 text_filter = ["Off", "Cycle 1", "Cycle 2", "Cycle 1 and 2"]
 
-"""
-The CRC is annoying.  Doing CRC's in python is even more annoying than it
-should be.  I hate it.
- * Generated on Sun Apr  2 10:09:58 2017,
- * by pycrc v0.9, https://pycrc.org
- * using the configuration:
- *    Width         = 8
- *    Poly          = 0x07
- *    Xor_In        = 0x02
- *    ReflectIn     = False
- *    Xor_Out       = 0x02
- *    ReflectOut    = False
- *    Algorithm     = bit-by-bit
 
-https://github.com/garbled1/gnhast/blob/master/balboacoll/collector.c
-"""
+class BalboaSpaLocalController:
+    def __init__(self, dev):
+        import serial
+        self._s = serial.Serial(dev, baudrate=115200)
 
+    def loop_forever(self):
+        while True:
+            msg = self.recv()
+            self.onmessage(msg)
+
+    def onmessage(self, msg):
+        print("hi")
+        pass
+
+    def recv(self):
+        while True:
+            b = self._s.read_until(bytes([messages.Message.DELIMETER]))
+            b += self._s.read_until(bytes([messages.Message.DELIMETER]))
+            try:
+                msg = messages.Message.from_bytes(b)
+            except ValueError as e:
+                continue
+            return msg
+
+    def send(self, msg):
+        while True:
+            try:
+                messages.ReadyMessage.from_bytes(self.recv())
+            except ValueError:
+                continue
+            return self._s.write(bytes(msg))
 
 class BalboaSpaWifi:
     def __init__(self, hostname, port=BALBOA_DEFAULT_PORT):
@@ -167,23 +184,6 @@ class BalboaSpaWifi:
         self.ssid = 'Unknown'
         self.log = logging.getLogger(__name__)
 
-    def balboa_calc_cs(self, data, length):
-        """ Calculate the checksum byte for a balboa message """
-        crc = 0xb5
-        for cur in range(length):
-            for i in range(8):
-                bit = crc & 0x80
-                crc = ((crc << 1) & 0xff) | ((data[cur] >> (7 - i)) & 0x01)
-                if (bit):
-                    crc = crc ^ 0x07
-            crc &= 0xff
-        for i in range(8):
-            bit = crc & 0x80
-            crc = (crc << 1) & 0xff
-            if bit:
-                crc ^= 0x07
-        return crc ^ 0x02
-
     async def connect(self):
         """ Connect to the spa."""
         try:
@@ -249,7 +249,7 @@ class BalboaSpaWifi:
         data[5] = ba
         data[6] = 0
         data[7] = bb
-        data[8] = self.balboa_calc_cs(data[1:], 7)
+        data[8] = messages.Message.crc(data[1:8])
         data[9] = M_END
 
         self.writer.write(data)
@@ -277,7 +277,7 @@ class BalboaSpaWifi:
             newtemp *= 2.0
         val = int(round(newtemp))
         data[5] = val
-        data[6] = self.balboa_calc_cs(data[1:], 5)
+        data[6] = messages.Message.crc(data[1:6])
         data[7] = M_END
 
         self.writer.write(data)
@@ -309,7 +309,7 @@ class BalboaSpaWifi:
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[5] = C_LIGHT1 if light == 0 else C_LIGHT2
         data[6] = 0x00  # who knows?
-        data[7] = self.balboa_calc_cs(data[1:], 6)
+        data[7] = messages.Message.crc(data[1:])
         data[8] = M_END
 
         self.writer.write(data)
@@ -354,7 +354,7 @@ class BalboaSpaWifi:
         for pushes in range(0, iter):
             # 4 is 0, 5 is 2, presume 6 is 3?
             data[5] = C_PUMP1 + pump
-            data[7] = self.balboa_calc_cs(data[1:], 6)
+            data[7] = messages.Message.crc(data[1:7])
             self.writer.write(data)
             await self.writer.drain()
             await asyncio.sleep(0.5)
@@ -381,7 +381,7 @@ class BalboaSpaWifi:
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[5] = C_HEATMODE
         data[6] = 0x00  # who knows?
-        data[7] = self.balboa_calc_cs(data[1:], 6)
+        data[7] = messages.Message.crc(data[1:7])
         data[8] = M_END
 
         # calculate how many times to push the button
@@ -415,7 +415,7 @@ class BalboaSpaWifi:
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[5] = C_TEMPRANGE
         data[6] = 0x00  # who knows?
-        data[7] = self.balboa_calc_cs(data[1:], 6)
+        data[7] = messages.Message.crc(data[1:7])
         data[8] = M_END
 
     async def change_aux(self, aux, newstate):
@@ -444,7 +444,7 @@ class BalboaSpaWifi:
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[5] = C_AUX1 if aux == 0 else C_AUX2
         data[6] = 0x00  # who knows?
-        data[7] = self.balboa_calc_cs(data[1:], 6)
+        data[7] = messages.Message.crc(data[1:7])
         data[8] = M_END
 
         self.writer.write(data)
@@ -472,7 +472,7 @@ class BalboaSpaWifi:
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[5] = C_MISTER
         data[6] = 0x00  # who knows?
-        data[7] = self.balboa_calc_cs(data[1:], 6)
+        data[7] = messages.Message.crc(data[1:7])
         data[8] = M_END
 
     async def change_blower(self, newstate):
@@ -503,7 +503,7 @@ class BalboaSpaWifi:
         # now push the button until we hit desired state
         for pushes in range(0, iter):
             data[5] = C_BLOWER
-            data[7] = self.balboa_calc_cs(data[1:], 6)
+            data[7] = messages.Message.crc(data[1:7])
             self.writer.write(data)
             await self.writer.drain()
             await asyncio.sleep(0.5)
@@ -773,7 +773,7 @@ class BalboaSpaWifi:
 
         full_data = header + data
         # don't count M_START, M_END or CHKSUM (remember that rlen is 2 short)
-        crc = self.balboa_calc_cs(full_data[1:], rlen-1)
+        crc = messages.Message.crc(full_data[1:rlen - 1])
         if crc != full_data[-2]:
             self.log.error('Message had bad CRC, discarding')
             return None
