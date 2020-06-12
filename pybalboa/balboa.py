@@ -84,13 +84,21 @@ class BalboaSpaLocalController:
             self.onmessage(msg)
 
     def onmessage(self, msg):
-        print("hi")
         pass
 
     def recv(self):
+        import serial
         while True:
-            b = self._s.read_until(bytes([messages.Message.DELIMETER]))
-            b += self._s.read_until(bytes([messages.Message.DELIMETER]))
+            try:
+                b = self._s.read_until(bytes([messages.Message.DELIMETER])) # Start of message
+                b = b[-1:] # Ignore bytes before start
+                b += self._s.read_until(bytes([messages.Message.DELIMETER])) # End of message
+                if b[1] == 0x7e:
+                    b = b[1:] # First byte read was end delimeter, strip it off
+            except serial.serialutil.SerialException as e:
+                logging.error(e);
+                time.sleep(1)
+                continue
             try:
                 msg = messages.Message.from_bytes(b)
             except ValueError as e:
