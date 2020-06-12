@@ -352,20 +352,20 @@ class BalboaSpaWifi:
 
         # calculate how many times to push the button
         if self.pump_array[pump] == 2:
-            for iter in range(0, 2):
+            for iter in range(1, 2+1):
                 if newstate == ((self.pump_status[pump] + iter) % 3):
                     break
         else:
             iter = 1
 
         # now push the button until we hit desired state
-        for pushes in range(0, iter):
+        for pushes in range(1, iter+1):
             # 4 is 0, 5 is 2, presume 6 is 3?
             data[5] = C_PUMP1 + pump
             data[7] = messages.Message.crc(data[1:7])
             self.writer.write(data)
             await self.writer.drain()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1.0)
 
     async def change_heatmode(self, newmode):
         """ Change the spa's heatmode to newmode. """
@@ -392,14 +392,22 @@ class BalboaSpaWifi:
         data[7] = messages.Message.crc(data[1:7])
         data[8] = M_END
 
+        # You can't put the spa in REST, it can BE in rest, but you cannot
+        # force it into rest.  It's a tri-state, but a binary switch.
+
         # calculate how many times to push the button
-        for iter in range(0, 3):
-            if newmode == ((self.heatmode + iter) % 3):
-                break
-        for pushes in range(0, iter):
-            self.writer.write(data)
-            await self.writer.drain()
-            await asyncio.sleep(0.5)
+        if newmode == self.HEATMODE_READY:
+            if (self.heatmode == self.HEATMODE_REST or
+                    self.heatmode == self.HEATMODE_RNR):
+                self.writer.write(data)
+                await self.writer.drain()
+                await asyncio.sleep(0.5)
+
+        if newmode == self.HEATMODE_REST or newmode == self.HEATMODE_RNR:
+            if self.heatmode == self.HEATMODE_READY:
+                self.writer.write(data)
+                await self.writer.drain()
+                await asyncio.sleep(0.5)
 
     async def change_temprange(self, newmode):
         """ Change the spa's temprange to newmode. """
@@ -504,12 +512,12 @@ class BalboaSpaWifi:
         data[8] = M_END
 
         # calculate how many times to push the button
-        for iter in range(0, 4):
+        for iter in range(1, 4+1):
             if newstate == ((self.blower_status + iter) % 4):
                 break
 
         # now push the button until we hit desired state
-        for pushes in range(0, iter):
+        for pushes in range(1, iter+1):
             data[5] = C_BLOWER
             data[7] = messages.Message.crc(data[1:7])
             self.writer.write(data)
@@ -710,9 +718,9 @@ class BalboaSpaWifi:
                 continue
             # 1-4 are in one byte, 5/6 are in another
             if i < 4:
-                self.pump_status[i] = (data[16] >> i) & 0x03
+                self.pump_status[i] = (data[16] >> i*2) & 0x03
             else:
-                self.pump_status[i] = (data[17] >> (i - 4)) & 0x03
+                self.pump_status[i] = (data[17] >> ((i - 4)*2)) & 0x03
 
         if self.circ_pump:
             if data[18] == 0x02:
@@ -786,7 +794,7 @@ class BalboaSpaWifi:
             self.log.error('Message had bad CRC, discarding')
             return None
 
-        # self.log.debug(full_data.hex())
+        # self.log.error('got update: {}'.format(full_data.hex()))
         return full_data
 
     async def check_connection_status(self):
