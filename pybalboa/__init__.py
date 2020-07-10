@@ -14,5 +14,7 @@ __license__ = "Apache 2.0"
 __copyright__ = "Copyright (c) 2019 Tim Rightnour"
 
 from .balboa import *
+from . import clients
+from . import messages
 
 if __name__ == '__main__': print(__version__)

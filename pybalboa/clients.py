@@ -1,157 +1,139 @@
 import asyncio
-import errno
+import datetime
 import logging
 import queue
-from socket import error as SocketError
 import time
+from socket import error as SocketError
 
 import pybalboa.messages as messages
 
-BALBOA_DEFAULT_PORT = 4257
+class Client:
 
-M_START = 0x7e
-M_END = 0x7e
-
-C_PUMP1 = 0x04
-C_PUMP2 = 0x05
-C_PUMP3 = 0x06
-C_PUMP4 = 0x07
-C_PUMP5 = 0x08
-C_PUMP6 = 0x09
-C_LIGHT1 = 0x11
-C_LIGHT2 = 0x12
-C_MISTER = 0x0e
-C_AUX1 = 0x16
-C_AUX2 = 0x17
-C_BLOWER = 0x0c
-C_TEMPRANGE = 0x50
-C_HEATMODE = 0x51
-
-MAX_PUMPS = 6
-
-NROF_BMT = 14
-
-(BMTR_STATUS_UPDATE,
- BMTR_FILTER_CONFIG,
- BMTS_CONFIG_REQ,
- BMTR_CONFIG_RESP,
- BMTS_FILTER_REQ,
- BMTS_CONTROL_REQ,
- BMTS_SET_TEMP,
- BMTS_SET_TIME,
- BMTS_SET_WIFI,
- BMTS_PANEL_REQ,
- BMTS_SET_TSCALE,
- BMTR_PANEL_RESP,
- BMTR_PANEL_NOCLUE1,
- BMTR_PANEL_NOCLUE2) = range(0, NROF_BMT)
-
-mtypes = [
-    [0xFF, 0xAF, 0x13],  # BMTR_STATUS_UPDATE
-    [0x0A, 0xBF, 0x23],  # BMTR_FILTER_CONFIG
-    [0x0A, 0xBF, 0x04],  # BMTS_CONFIG_REQ
-    [0x0A, 0XBF, 0x94],  # BMTR_CONFIG_RESP
-    [0x0A, 0xBF, 0x22],  # BMTS_FILTER_REQ
-    [0x0A, 0xBF, 0x11],  # BMTS_CONTROL_REQ
-    [0x0A, 0xBF, 0x20],  # BMTS_SET_TEMP
-    [0x0A, 0xBF, 0x21],  # BMTS_SET_TIME
-    [0x0A, 0xBF, 0x92],  # BMTS_SET_WIFI
-    [0x0A, 0xBF, 0x22],  # BMTS_PANEL_REQ
-    [0x0A, 0XBF, 0x27],  # BMTS_SET_TSCALE
-    [0x0A, 0xBF, 0x2E],  # BMTR_PANEL_RESP
-    [0x0A, 0xBF, 0x24],  # BMTR_PANEL_NOCLUE1
-    [0x0A, 0XBF, 0x25],  # BMTR_PANEL_NOCLUE2
-]
-
-text_heatmode = ["Ready", "Ready in Rest", "Rest"]
-text_heatstate = ["Idle", "Heating", "Heat Waiting"]
-text_tscale = ["Fahrenheit", "Celsius"]
-text_timescale = ["12h", "24h"]
-text_pump = ["Off", "Low", "High"]
-text_temprange = ["High", "Low"]
-text_blower = ["Off", "Low", "Medium", "High"]
-text_switch = ["Off", "On"]
-text_filter = ["Off", "Cycle 1", "Cycle 2", "Cycle 1 and 2"]
-
-
-class BalboaSpaWifi:
-    def __init__(self, hostname, port=BALBOA_DEFAULT_PORT):
-        # API Constants
-        self.TSCALE_C = 1
-        self.TSCALE_F = 0
-        self.HEATMODE_READY = 0
-        self.HEATMODE_RNR = 1  # Ready in Rest
-        self.HEATMODE_REST = 2
-        self.TIMESCALE_12H = 0
-        self.TIMESCALE_24H = 1
-        self.PUMP_OFF = 0
-        self.PUMP_LOW = 1
-        self.PUMP_HIGH = 2
-        self.TEMPRANGE_LOW = 0
-        self.TEMPRANGE_HIGH = 1
-        self.tmin = [
-            [50.0, 10.0],
-            [80.0, 26.0],
-        ]
-        self.tmax = [
-            [80.0, 26.0],
-            [104.0, 40.0],
-        ]
-        self.BLOWER_OFF = 0
-        self.BLOWER_LOW = 1
-        self.BLOWER_MEDIUM = 2
-        self.BLOWER_HIGH = 3
-        self.FILTER_OFF = 0
-        self.FILTER_1 = 1
-        self.FILTER_2 = 2
-        self.FILTER_1_2 = 3
-        self.OFF = 0
-        self.ON = 1
-        self.HEATSTATE_IDLE = 0
-        self.HEATSTATE_HEATING = 1
-        self.HEATSTATE_HEAT_WAITING = 2
-
-        # Internal states
-        self.host = hostname
-        self.port = port
-        self.reader = None
-        self.writer = None
-        self.connected = False
-        self.config_loaded = False
-        self.pump_array = [0, 0, 0, 0, 0, 0]
-        self.light_array = [0, 0]
-        self.circ_pump = 0
-        self.blower = 0
-        self.mister = 0
-        self.aux_array = [0, 0]
-        self.tempscale = self.TSCALE_F
-        self.priming = 0
-        self.timescale = 0
-        self.curtemp = 0.0
-        self.settemp = 0.0
-        self.heatmode = 0
-        self.heatstate = 0
-        self.temprange = 0
-        self.pump_status = [0, 0, 0, 0, 0, 0]
-        self.circ_pump_status = 0
-        self.light_status = [0, 0]
-        self.mister_status = 0
-        self.blower_status = 0
-        self.aux_status = [0, 0]
-        self.lastupd = 0
-        self.sleep_time = 60
-        self.macaddr = 'Unknown'
-        self.time_hour = 0
-        self.time_minute = 0
-        self.filter_mode = 0
-        self.prior_status = None
-        self.new_data_cb = None
-        self.model_name = 'Unknown'
-        self.sw_vers = 'Unknown'
-        self.cfg_sig = 'Unknown'
-        self.setup = 0
-        self.ssid = 'Unknown'
+    def __init__(self, channel=None):
+        self.channel = channel
         self.log = logging.getLogger(__name__)
+        self.queue = queue.Queue()
+        self._channel_timeout = None
+        if channel is not None:
+            self._channel_timeout = time.time() + 10
+        asyncio.ensure_future(self.listen())
+
+    async def listen(self):
+        while True:
+            msg = self.recv()
+            self._onmessage(msg)
+            self.onmessage(msg)
+
+    def _onmessage(self, msg):
+        if self.channel is None:
+            if msg.type_code == messages.NewClientClearToSend.TYPE_CODE:
+                self.log.debug("Requesting channel...")
+                self._send_internal(messages.ChannelAssignmentRequest(bytes([0x02, 0xF1, 0x73]))); # TODO: Determine meaning of these bytes (probably unique)
+            elif msg.type_code == messages.ChannelAssignmentResponse.TYPE_CODE:
+                self.channel = msg.arguments[0];
+                self.log.debug("Acknowledging assignment to channel {}".format(self.channel))
+                self._send_internal(messages.ChannelAssignmentAcknowlegement(self.channel))
+        elif msg.channel == self.channel:
+            if msg.type_code == messages.ExistingClientRequest.TYPE_CODE:
+                self._send_internal(messages.ExisingClientResponse(self.channel, bytes([0x04, 0x08, 0x00])))
+            elif msg.type_code == messages.ClientClearToSend.TYPE_CODE:
+                if self.queue.empty():
+                    self._send_internal(messages.NothingToSend(self.channel))
+                else:
+                    msg = self.queue.get()
+                    self._send_internal(msg)
+                    self.log.debug(msg.__class__.__name__ + " sent on channel {}".format(msg.channel))
+            self._channel_timeout = None
+        elif self._channel_timeout is not None:
+            if time.time() > self._channel_timeout:
+                self.log.error("No Client Clear to Send detected on channel {}, client will only listen.".format(self.channel))
+
+    def onmessage(self, msg):
+        pass
+
+    def send(self, msg):
+        self.queue.put(msg)
+        self.log.debug(msg.__class__.__name__ + " queued on channel {}".format(msg.channel))
+
+    def _send_internal(self, msg):
+        raise NotImplementedError()
+
+    def set_filter_cycles(self, start1: datetime.time, duration1: datetime.timedelta, *, start2: datetime.time=None, duration2: datetime.timedelta=None):
+        self.send(messages.SetFilterCyclesRequest(self.channel,
+            start1,
+            duration1,
+            start2=start2,
+            duration2=duration2
+        ))
+
+    def set_temperature(self, t):
+        self.send(messages.SetTemperatureRequest(self.channel, t))
+
+    def set_time(self, t):
+        self.send(messages.SetTimeRequest(self.channel, t))
+
+    def toggle_item(self, item):
+        self.send(messages.ToggleItemRequest(self.channel, item))
+
+    def toggle_light(self, n):
+        if n in [1, 2]:
+            item_code = messages.ToggleItemRequest.ITEM_CODE_LIGHT_1 + (n - 1)
+            msg = messages.ToggleItemRequest(self.channel, item_code)
+        else:
+            raise NotImplementedError()
+        self.send(msg)
+
+    def toggle_pump(self, n):
+        if n in [1, 2, 3, 4, 5, 6]:
+            item_code = messages.ToggleItemRequest.ITEM_CODE_PUMP_1 + (n - 1)
+            msg = messages.ToggleItemRequest(self.channel, item_code)
+        else:
+            raise NotImplementedError()
+        self.send(msg)
+
+
+class SerialClient(Client):
+
+    def __init__(self, dev, channel=None):
+        import serial
+        super().__init__(channel)
+        self._s = serial.Serial(dev, baudrate=115200)
+
+    def recv(self):
+        import serial
+        while True:
+            try:
+                b = self._s.read_until(bytes([messages.Message.DELIMETER])) # Start of message
+                b += self._s.read(1) # Read in length
+                if b[1] == messages.Message.DELIMETER: # Check if first read was actually end of previous message
+                    b = b[1:2] + self._s.read(1) # Drop first delimiter, read in length
+                b += self._s.read(b[1]) # Read rest of message
+            except serial.serialutil.SerialException as e:
+                self.log.error(e);
+                time.sleep(1) # Errors are usually recoverable after waiting
+                continue
+            try:
+                msg = messages.Message.from_bytes(b)
+            except ValueError as e:
+                continue
+            return msg
+
+    def _send_internal(self, msg):
+        self._s.write(bytes(msg))
+
+
+class TcpClient(Client):
+
+    def __init__(self, hostname, port=4257):
+        super().__init__()
+        asyncio.get_current_loop().run_until_complete(self.connect())
+        asyncio.ensure_future(self.listen())
+
+    async def _send_internal(self, msg):
+        if not self.connected:
+            return
+        self.writer.write(bytes(msg))
+        await self.writer.drain()
 
     async def connect(self):
         """ Connect to the spa."""
@@ -182,22 +164,12 @@ class BalboaSpaWifi:
         else:
             await self.new_data_cb()
 
-    async def send_config_req(self):
+    def send_config_req(self):
         """ Ask the spa for it's config. """
         if not self.connected:
             return
-
-        data = bytearray(7)
-        data[0] = M_START
-        data[1] = 5  # len of msg
-        data[2] = mtypes[BMTS_CONFIG_REQ][0]
-        data[3] = mtypes[BMTS_CONFIG_REQ][1]
-        data[4] = mtypes[BMTS_CONFIG_REQ][2]
-        data[5] = 0x77  # known value
-        data[6] = M_END
-
-        self.writer.write(data)
-        await self.writer.drain()
+        msg = messages.Messages(type_code=0x04, channel=0x0A)
+        asyncio.get_running_loop().run_until_complete(self.send(msg))
 
     async def send_panel_req(self, ba, bb):
         """ Send a panel request, 2 bytes of data.
@@ -210,7 +182,7 @@ class BalboaSpaWifi:
             return
 
         data = bytearray(10)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 8
         data[2] = mtypes[BMTS_PANEL_REQ][0]
         data[3] = mtypes[BMTS_PANEL_REQ][1]
@@ -219,7 +191,7 @@ class BalboaSpaWifi:
         data[6] = 0
         data[7] = bb
         data[8] = messages.Message.crc(data[1:8])
-        data[9] = M_END
+        data[9] = messages.Message.DELIMETER
 
         self.writer.write(data)
         await self.writer.drain()
@@ -236,7 +208,7 @@ class BalboaSpaWifi:
             return
 
         data = bytearray(8)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 6
         data[2] = mtypes[BMTS_SET_TEMP][0]
         data[3] = mtypes[BMTS_SET_TEMP][1]
@@ -247,7 +219,7 @@ class BalboaSpaWifi:
         val = int(round(newtemp))
         data[5] = val
         data[6] = messages.Message.crc(data[1:6])
-        data[7] = M_END
+        data[7] = messages.Message.DELIMETER
 
         self.writer.write(data)
         await self.writer.drain()
@@ -271,7 +243,7 @@ class BalboaSpaWifi:
 
         # Setup the basic things we know
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
@@ -279,7 +251,7 @@ class BalboaSpaWifi:
         data[5] = C_LIGHT1 if light == 0 else C_LIGHT2
         data[6] = 0x00  # who knows?
         data[7] = messages.Message.crc(data[1:])
-        data[8] = M_END
+        data[8] = messages.Message.DELIMETER
 
         self.writer.write(data)
         await self.writer.drain()
@@ -303,30 +275,30 @@ class BalboaSpaWifi:
 
         # what we know:
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[6] = 0x00  # who knows?
-        data[8] = M_END
+        data[8] = messages.Message.DELIMETER
 
         # calculate how many times to push the button
         if self.pump_array[pump] == 2:
-            for iter in range(1, 2+1):
+            for iter in range(0, 2):
                 if newstate == ((self.pump_status[pump] + iter) % 3):
                     break
         else:
             iter = 1
 
         # now push the button until we hit desired state
-        for pushes in range(1, iter+1):
+        for pushes in range(0, iter):
             # 4 is 0, 5 is 2, presume 6 is 3?
             data[5] = C_PUMP1 + pump
             data[7] = messages.Message.crc(data[1:7])
             self.writer.write(data)
             await self.writer.drain()
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
     async def change_heatmode(self, newmode):
         """ Change the spa's heatmode to newmode. """
@@ -343,7 +315,7 @@ class BalboaSpaWifi:
 
         # what we know:
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
@@ -351,24 +323,16 @@ class BalboaSpaWifi:
         data[5] = C_HEATMODE
         data[6] = 0x00  # who knows?
         data[7] = messages.Message.crc(data[1:7])
-        data[8] = M_END
-
-        # You can't put the spa in REST, it can BE in rest, but you cannot
-        # force it into rest.  It's a tri-state, but a binary switch.
+        data[8] = messages.Message.DELIMETER
 
         # calculate how many times to push the button
-        if newmode == self.HEATMODE_READY:
-            if (self.heatmode == self.HEATMODE_REST or
-                    self.heatmode == self.HEATMODE_RNR):
-                self.writer.write(data)
-                await self.writer.drain()
-                await asyncio.sleep(0.5)
-
-        if newmode == self.HEATMODE_REST or newmode == self.HEATMODE_RNR:
-            if self.heatmode == self.HEATMODE_READY:
-                self.writer.write(data)
-                await self.writer.drain()
-                await asyncio.sleep(0.5)
+        for iter in range(0, 3):
+            if newmode == ((self.heatmode + iter) % 3):
+                break
+        for pushes in range(0, iter):
+            self.writer.write(data)
+            await self.writer.drain()
+            await asyncio.sleep(0.5)
 
     async def change_temprange(self, newmode):
         """ Change the spa's temprange to newmode. """
@@ -385,7 +349,7 @@ class BalboaSpaWifi:
 
         # what we know:
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
@@ -393,7 +357,7 @@ class BalboaSpaWifi:
         data[5] = C_TEMPRANGE
         data[6] = 0x00  # who knows?
         data[7] = messages.Message.crc(data[1:7])
-        data[8] = M_END
+        data[8] = messages.Message.DELIMETER
 
     async def change_aux(self, aux, newstate):
         """ Change aux #aux to newstate. """
@@ -414,7 +378,7 @@ class BalboaSpaWifi:
 
         # Setup the basic things we know
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
@@ -422,7 +386,7 @@ class BalboaSpaWifi:
         data[5] = C_AUX1 if aux == 0 else C_AUX2
         data[6] = 0x00  # who knows?
         data[7] = messages.Message.crc(data[1:7])
-        data[8] = M_END
+        data[8] = messages.Message.DELIMETER
 
         self.writer.write(data)
         await self.writer.drain()
@@ -442,7 +406,7 @@ class BalboaSpaWifi:
 
         # what we know:
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
@@ -450,7 +414,7 @@ class BalboaSpaWifi:
         data[5] = C_MISTER
         data[6] = 0x00  # who knows?
         data[7] = messages.Message.crc(data[1:7])
-        data[8] = M_END
+        data[8] = messages.Message.DELIMETER
 
     async def change_blower(self, newstate):
         """ Change blower to newstate. """
@@ -464,21 +428,21 @@ class BalboaSpaWifi:
 
         # what we know:
         data = bytearray(9)
-        data[0] = M_START
+        data[0] = messages.Message.DELIMETER
         data[1] = 7
         data[2] = mtypes[BMTS_CONTROL_REQ][0]
         data[3] = mtypes[BMTS_CONTROL_REQ][1]
         data[4] = mtypes[BMTS_CONTROL_REQ][2]
         data[6] = 0x00  # who knows?
-        data[8] = M_END
+        data[8] = messages.Message.DELIMETER
 
         # calculate how many times to push the button
-        for iter in range(1, 4+1):
+        for iter in range(0, 4):
             if newstate == ((self.blower_status + iter) % 4):
                 break
 
         # now push the button until we hit desired state
-        for pushes in range(1, iter+1):
+        for pushes in range(0, iter):
             data[5] = C_BLOWER
             data[7] = messages.Message.crc(data[1:7])
             self.writer.write(data)
@@ -679,9 +643,9 @@ class BalboaSpaWifi:
                 continue
             # 1-4 are in one byte, 5/6 are in another
             if i < 4:
-                self.pump_status[i] = (data[16] >> i*2) & 0x03
+                self.pump_status[i] = (data[16] >> i) & 0x03
             else:
-                self.pump_status[i] = (data[17] >> ((i - 4)*2)) & 0x03
+                self.pump_status[i] = (data[17] >> (i - 4)) & 0x03
 
         if self.circ_pump:
             if data[18] == 0x02:
@@ -735,8 +699,8 @@ class BalboaSpaWifi:
             self.log.error('Spa read failed: {0}'.format(str(e)))
             return None
 
-        if header[0] == M_START:
-            # header[1] is size, + checksum + M_END (we already read 2 tho!)
+        if header[0] == messages.Message.DELIMETER:
+            # header[1] is size, + checksum + messages.Message.DELIMETER (we already read 2 tho!)
             rlen = header[1]
         else:
             return None
@@ -749,13 +713,13 @@ class BalboaSpaWifi:
             return None
 
         full_data = header + data
-        # don't count M_START, M_END or CHKSUM (remember that rlen is 2 short)
+        # don't count messages.Message.DELIMETER, messages.Message.DELIMETER or CHKSUM (remember that rlen is 2 short)
         crc = messages.Message.crc(full_data[1:rlen - 1])
         if crc != full_data[-2]:
             self.log.error('Message had bad CRC, discarding')
             return None
 
-        # self.log.error('got update: {}'.format(full_data.hex()))
+        # self.log.debug(full_data.hex())
         return full_data
 
     async def check_connection_status(self):
