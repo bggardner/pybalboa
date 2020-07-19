@@ -15,6 +15,7 @@ __copyright__ = "Copyright (c) 2019 Tim Rightnour"
 
 from .balboa import *
 from . import clients
+from . import homie
 from . import messages
 
 if __name__ == '__main__': print(__version__)

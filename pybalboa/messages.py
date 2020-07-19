@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+from enum import IntEnum, unique
 import re
 import struct
 
@@ -25,7 +26,7 @@ class Message(object):
         0xde, 0xd9, 0xd0, 0xd7, 0xc2, 0xc5, 0xcc, 0xcb, 0xe6, 0xe1, 0xe8, 0xef, 0xfa, 0xfd, 0xf4, 0xf3
     ];
 
-    DELIMETER = 0x7e
+    DELIMITER = 0x7e
 
     def __init__(self, *, channel, type_code, arguments=bytes()):
         self.channel = channel
@@ -38,7 +39,7 @@ class Message(object):
         b += bytes([0xAF if self.channel == self.BROADCAST_CHANNEL else 0xBF])
         b += bytes([self.type_code])
         b += self.arguments
-        return bytes([self.DELIMETER]) + b + bytes([Message.crc(b), self.DELIMETER])
+        return bytes([self.DELIMITER]) + b + bytes([Message.crc(b), self.DELIMITER])
 
     def __iter__(self):
         self._cursor = 0
@@ -64,8 +65,8 @@ class Message(object):
     @classmethod
     def from_bytes(cls, b):
         b = bytes(b)
-        if b[0] != Message.DELIMETER or b[-1] != Message.DELIMETER:
-            raise ValueError("Messages must start and end with Message.DELIMETER")
+        if b[0] != Message.DELIMITER or b[-1] != Message.DELIMITER:
+            raise ValueError("Messages must start and end with Message.DELIMITER")
         b = b[1:-1]
         if len(b) < 5 or b[0] != len(b) or (hasattr(cls, "LENGTH") and b[0] != cls.LENGTH):
             raise ValueError("Invalid length for " + cls.__name__)
@@ -131,13 +132,13 @@ class ExistingClientRequest(Message):
         super().__init__(type_code=self.TYPE_CODE, channel=channel)
 
 
-class ExsitingClientResponse(Message):
+class ExistingClientResponse(Message):
 
     TYPE_CODE = 0x05
     LENGTH = 0x08
 
     def __init__(self, channel, arguments):
-         super().__ini__(type_code=self.TYPE_CODE, channel=channel, arguments=arguments)
+         super().__init__(type_code=self.TYPE_CODE, channel=channel, arguments=arguments)
 
 
 class ClientClearToSend(Message):
@@ -173,22 +174,24 @@ class ToggleItemRequest(Message):
     TYPE_CODE = 0x11
     LENGTH = 7
 
-    ITEM_CODE_PRIMING_MODE = 0x01
-    ITEM_CODE_PUMP_1 = 0x04
-    ITEM_CODE_PUMP_2 = 0x05
-    ITEM_CODE_PUMP_3 = 0x06
-    ITEM_CODE_PUMP_4 = 0x07
-    ITEM_CODE_PUMP_5 = 0x08
-    ITEM_CODE_PUMP_6 = 0x09
-    ITEM_CODE_BLOWER = 0x0C
-    ITEM_CODE_MISTER = 0x0E
-    ITEM_CODE_LIGHT_1 = 0x11
-    ITEM_CODE_LIGHT_2 = 0x12
-    ITEM_CODE_AUX_1 = 0x16
-    ITEM_CODE_AUX_2 = 0x17
-    ITEM_CODE_HOLD_MODE = 0x3C
-    ITEM_CODE_TEMPERATURE_RANGE = 0x50
-    ITEM_CODE_HEAT_MODE = 0x51
+    @unique
+    class ItemCode(IntEnum):
+        PRIMING_MODE = 0x01
+        PUMP_1 = 0x04
+        PUMP_2 = 0x05
+        PUMP_3 = 0x06
+        PUMP_4 = 0x07
+        PUMP_5 = 0x08
+        PUMP_6 = 0x09
+        BLOWER = 0x0C
+        MISTER = 0x0E
+        LIGHT_1 = 0x11
+        LIGHT_2 = 0x12
+        AUX_1 = 0x16
+        AUX_2 = 0x17
+        HOLD_MODE = 0x3C
+        TEMPERATURE_RANGE = 0x50
+        HEAT_MODE = 0x51
 
     def __init__(self, channel, item):
         super().__init__(type_code=self.TYPE_CODE, channel=channel, arguments=bytes([item, 0x00]))
@@ -537,47 +540,62 @@ class PreferencesResponse(Message):
         super().__init__(type_code=self.TYPE_CODE, channel=channel, arguments=arguments)
 
 
-class SetPreferencesRequest(Message):
+class SetPreferenceRequest(Message):
 
     TYPE_CODE = 0x27
     LENGTH = 7
 
-    REMINDERS = 0x00
-    TEMPERATURE_SCALE = 0x01
-    CLOCK_MODE = 0x02
-    CLEANUP_CYCLE = 0x03
-    DOLPHIN_ADDRESS = 0x04
-    M8_AI = 0x06
-
+    @unique
+    class PreferenceCode(IntEnum):
+        REMINDERS = 0x00
+        TEMPERATURE_SCALE = 0x01
+        CLOCK_MODE = 0x02
+        CLEANUP_CYCLE = 0x03
+        DOLPHIN_ADDRESS = 0x04
+        M8_AI = 0x06
 
     def __init__(self, channel, code, value):
         super().__init__(type_code=self.TYPE_CODE, channel=channel, arguments=bytes([code, value]))
 
 
-class SetTemperatureScaleRequest(SetPreferencesRequest):
+class SetTemperatureScaleRequest(SetPreferenceRequest):
 
     FAHRENHEIT = 0x00
     CELSIUS    = 0x01
 
     def __init__(self, channel, scale):
         scale = int(scale)
-        if scale != SetTemperatureScaleRequest.FAHRENHEIT or scale != SetTemperatureScaleRequest.CELSIUS:
+        if scale != SetTemperatureScaleRequest.FAHRENHEIT and scale != SetTemperatureScaleRequest.CELSIUS:
             raise ValueError("Invalid Temperature Scale")
-        super().__init__(channel, super().TEMPERATURE_SCALE, scale)
+        super().__init__(channel, super().PreferenceCode.TEMPERATURE_SCALE, scale)
 
     @property
     def scale(self):
         return bytes(self)[5]
 
 
+class SetClockModeRequest(SetPreferenceRequest):
+
+    MODE_12_HOUR = 0x00
+    MODE_24_HOUR = 0x01
+
+    def __init__(self, channel, mode):
+        mode = int(mode)
+        if mode != SetClockModeRequest.MODE_12_HOUR and scale != SetClockModeRequest.MODE_24_HOUR:
+            raise ValueError("Invalid Clock Mode")
+        super().__init__(channel, super().PreferenceCode.CLOCK_MODE, mode)
+
+
 class FaultLogResponse(Message):
 
     TYPE_CODE = 0x28
     LENGTH = 15
+
     MESSAGES = { # Per TP900 User Guide
         15: "Sensors are out of sync",
         16: "The water flow is low",
         17: "The water flow has failed",
+        18: "The settings have been reset",
         19: "Priming Mode",
         20: "The clock has failed",
         21: "The settings have been reset",
